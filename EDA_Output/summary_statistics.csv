@@ -1,0 +1,13 @@
+Metric,Value
+Dataset Shape,92650 rows × 15 columns
+Target Variable,generation_mw
+Time Column,datetime
+Missing Values,354975
+Duplicates,160
+Data Completeness,-18.88%
+Target Mean,9429.38
+Target Std,211975.94
+Target Min,73.00
+Target Max,64526500.00
+Skewness,304.3167
+Outliers (IQR %),0.02%
