@@ -11,6 +11,13 @@ Models:
 
 Author: Data Science Team
 Date: June 2025
+
+USAGE:
+    python forecast_pipeline_complete.py
+    
+    Or use the launcher:
+    - Windows: double-click setup_and_run.bat
+    - Cross-platform: python launch_forecasting.py
 """
 
 import os
@@ -741,4 +748,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nPipeline interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n\n✗ Pipeline failed with error: {e}")
+        print("\nDebug information:")
+        print(f"Python version: {sys.version}")
+        print(f"Working directory: {os.getcwd()}")
+        traceback.print_exc()
+        sys.exit(1)
