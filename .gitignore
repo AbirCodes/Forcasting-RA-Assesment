@@ -62,12 +62,7 @@ logs/
 lightning_logs/
 
 # Output files
-EDA_Output/
-*.png
-*.jpg
-*.jpeg
-*.gif
-*.svg
+
 
 # Temporary files
 *.tmp
@@ -75,7 +70,6 @@ EDA_Output/
 *.cache
 
 # Data files (large datasets)
-*.csv
 *.db
 *.sqlite
 *.sqlite3
