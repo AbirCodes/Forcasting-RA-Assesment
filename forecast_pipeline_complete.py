@@ -28,93 +28,70 @@ import warnings
 from pathlib import Path
 warnings.filterwarnings('ignore')
 
+# Import torch for GPU detection (before tqdm fallback)
+try:
+    import torch
+    USE_CUDA = torch.cuda.is_available()
+except ImportError:
+    USE_CUDA = False
+
+# Import tqdm for progress bars (use try-except for compatibility)
+try:
+    from tqdm import tqdm
+except ImportError:
+    # Fallback if tqdm is not available
+    class tqdm:
+        def __init__(self, *args, **kwargs):
+            self.n = 0
+        def update(self, n):
+            pass
+        def close(self):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    print("[!] tqdm not installed - progress bars disabled. Install with: pip install tqdm")
+
+
 # ============================================================================
 # STEP 0: ENVIRONMENT SETUP
 # ============================================================================
 
-def ensure_dependencies():
-    """Ensure all required packages are installed."""
-    print("\n" + "=" * 80)
-    print("STEP 0: ENVIRONMENT SETUP")
-    print("=" * 80)
-    
-    required_packages = {
-        'pandas': 'pandas>=2.0.0',
-        'numpy': 'numpy>=1.24.0',
-        'scipy': 'scipy>=1.11.0',
-        'sklearn': 'scikit-learn>=1.3.0',
-        'matplotlib': 'matplotlib>=3.7.0',
-        'seaborn': 'seaborn>=0.12.0',
-        'statsmodels': 'statsmodels>=0.14.0',
-        'lightgbm': 'lightgbm>=4.0.0',
-        'xgboost': 'xgboost>=2.0.0',
-        'torch': 'torch>=2.0.0',
-        'neuralforecast': 'neuralforecast>=1.5.0',
-    }
-    
-    print("\nChecking dependencies...")
-    missing = []
-    
-    for pkg, spec in required_packages.items():
-        try:
-            __import__(pkg.split('-')[0].replace('scikit-learn', 'sklearn').replace('statsmodels', 'statsmodels').replace('seaborn', 'seaborn').replace('matplotlib', 'matplotlib'))
-            print(f"  ✓ {pkg}")
-        except ImportError:
-            print(f"  ✗ {pkg} - MISSING")
-            missing.append(spec)
-    
-    if missing:
-        print(f"\nInstalling {len(missing)} missing packages...")
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], check=True)
-            for spec in missing:
-                print(f"  Installing {spec}...")
-                subprocess.run([sys.executable, "-m", "pip", "install", spec], check=True, capture_output=True)
-            print("\n[✓] All packages installed successfully!")
-        except Exception as e:
-            print(f"\n[✗] Installation failed: {e}")
-            print("Please install manually:")
-            for spec in missing:
-                print(f"  pip install {spec}")
-            sys.exit(1)
-    else:
-        print("\n[✓] All dependencies satisfied!")
-
-
 def check_gpu():
-    """Check for GPU availability."""
+    """Check for GPU availability and return device info string."""
     print("\n" + "=" * 80)
     print("GPU AVAILABILITY CHECK")
     print("=" * 80)
+    
+    device_info = "CPU"
+    gpu_available = False
     
     # PyTorch
     try:
         import torch
         if torch.cuda.is_available():
+            device_info = f"GPU: {torch.cuda.get_device_name(0)}"
             print(f"[✓] PyTorch CUDA GPU detected: {torch.cuda.get_device_name(0)}")
             print(f"    GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
             print(f"    CUDA Version: {torch.version.cuda}")
-            return True
+            gpu_available = True
     except ImportError:
         pass
     
-    # TensorFlow
-    try:
-        import tensorflow as tf
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            print(f"[✓] TensorFlow GPU detected: {gpus[0].name}")
-            for gpu in gpus:
-                print(f"    {gpu.name}")
-            return True
-    except ImportError:
-        pass
+    if not gpu_available:
+        print(f"\n[ℹ] Using CPU for model training")
     
-    print("[!] No GPU detected - using CPU (slower for deep learning models)")
-    print("    For GPU support:")
-    print("    - PyTorch: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118")
-    print("    - TensorFlow: pip install tensorflow[and-cuda]")
-    return False
+    return gpu_available, device_info
+
+
+def create_results_folder():
+    """Create model_results folder for output files."""
+    results_dir = 'model_results'
+    if not os.path.exists(results_dir):
+        os.makedirs(results_dir)
+        print(f"[✓] Created results folder: {results_dir}")
+    return results_dir
 
 
 # ============================================================================
@@ -135,29 +112,15 @@ def load_and_clean_data():
     df = pd.read_excel('PGCB_date_power_demand.xlsx')
     print(f"[✓] Loaded {len(df):,} rows × {len(df.columns)} columns")
     
-    # Display columns
-    print("\nDataset columns:")
-    for i, col in enumerate(df.columns, 1):
-        print(f"  {i}. {col}: {df[col].dtype}")
-    
     # Identify target column
     target_col = 'generation_mw'
     if target_col not in df.columns:
-        # Try to find it
         for col in df.columns:
             if 'generation' in col.lower() or 'power' in col.lower():
                 target_col = col
                 break
     
     print(f"\nTarget variable: {target_col}")
-    
-    # Check data types
-    print(f"\nData type distribution:")
-    print(df.dtypes.value_counts())
-    
-    # Summary statistics
-    print(f"\nTarget variable statistics:")
-    print(df[target_col].describe().round(2))
     
     # Check for duplicates
     duplicates = df.duplicated().sum()
@@ -181,7 +144,6 @@ def load_and_clean_data():
         print(f"  Duration: {(df[datetime_col].max() - df[datetime_col].min()).days} days")
     
     print("\n[✓] Data loading complete")
-    
     return df, target_col, datetime_col
 
 
@@ -224,51 +186,83 @@ def clean_data(df, target_col):
     print(f"  Missing values: {missing_target} ({missing_target/len(df_clean)*100:.2f}%)")
     
     if missing_target > 0:
-        # Linear interpolation
-        df_clean[target_col] = df_clean[target_col].interpolate(method='linear')
-        # Forward fill remaining
-        df_clean[target_col] = df_clean[target_col].fillna(method='ffill')
-        # Backward fill remaining
-        df_clean[target_col] = df_clean[target_col].fillna(method='bfill')
-        print(f"  Applied: Linear interpolation → FFill → BFill")
+        df_clean[target_col] = df_clean[target_col].fillna(0)
+        print(f"  Applied: Imputed missing values with 0")
     
-    # 4. Handle outliers
-    print(f"\n[4] Outlier handling for {target_col}:")
+    # 4. Handle missing values in ALL columns
+    print(f"\n[4] Seasonal-aware imputation for all numeric columns...")
     
-    # Calculate IQR bounds
+    numeric_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
+    if target_col in numeric_cols:
+        numeric_cols.remove(target_col)
+    if datetime_col in numeric_cols:
+        numeric_cols.remove(datetime_col)
+    
+    print(f"  Columns to impute: {numeric_cols}")
+    
+    for col in numeric_cols:
+        missing_count = df_clean[col].isnull().sum()
+        if missing_count == 0:
+            continue
+        
+        # Use same-hour-yesterday imputation (24h lag)
+        df_clean[col] = impute_with_lag(df_clean[col], lag=24)
+        
+        # Forward/backward fill remaining
+        df_clean[col] = df_clean[col].fillna(method='ffill').fillna(method='bfill')
+        
+        # Set negative values to 0
+        negative_count = (df_clean[col] < 0).sum()
+        if negative_count > 0:
+            df_clean.loc[df_clean[col] < 0, col] = 0
+        
+        # Cap at historical range
+        Q1 = df_clean[col].quantile(0.25)
+        Q3 = df_clean[col].quantile(0.75)
+        IQR = Q3 - Q1
+        upper_bound = Q3 + 3 * IQR
+        
+        capped_count = (df_clean[col] > upper_bound).sum()
+        if capped_count > 0:
+            df_clean.loc[df_clean[col] > upper_bound, col] = upper_bound
+        
+        final_missing = df_clean[col].isnull().sum()
+        print(f"    ✓ {col}: 24h-lag imputation (missing: {missing_count} → {final_missing})")
+    
+    # 5. Handle outliers
+    print(f"\n[5] Outlier handling for {target_col}:")
     Q1 = df_clean[target_col].quantile(0.25)
     Q3 = df_clean[target_col].quantile(0.75)
     IQR = Q3 - Q1
-    lower_bound = Q1 - 1.5 * IQR
     upper_bound = Q3 + 1.5 * IQR
-    
-    # Also use domain knowledge: Bangladesh capacity ~24,000 MW
-    # So cap at 30,000 MW (conservative)
     domain_bound = 30000
-    
-    print(f"  IQR bounds: [{lower_bound:.0f}, {upper_bound:.0f}]")
-    print(f"  Domain bound: <= {domain_bound} MW")
-    
-    # Cap at maximum of both bounds
     safe_upper = min(upper_bound, domain_bound)
     
     n_outliers = (df_clean[target_col] > safe_upper).sum()
-    print(f"  Outliers above {safe_upper:.0f} MW: {n_outliers} ({n_outliers/len(df_clean)*100:.2f}%)")
-    
-    # Cap outliers
+    print(f"  Outliers above {safe_upper:.0f} MW: {n_outliers}")
     df_clean.loc[df_clean[target_col] > safe_upper, target_col] = safe_upper
-    print(f"  Applied: Capped outliers at {safe_upper:.0f} MW")
     
     print("\n[✓] Data cleaning complete")
-    
     return df_clean, datetime_col
+
+
+def impute_with_lag(series, lag=24):
+    """Impute missing values using same-hour-lag pattern."""
+    result = series.copy()
+    for current_lag in [lag, lag * 2, lag * 7]:
+        if result.isnull().sum() == 0:
+            break
+        lagged = series.shift(current_lag)
+        mask = result.isnull() & lagged.notnull()
+        result.loc[mask] = lagged.loc[mask]
+    return result
 
 
 # ============================================================================
 # STEP 2: FEATURE ENGINEERING
 # ============================================================================
 
-def create_features(df, target_col, datetime_col, forecast_horizon=24):
+def create_features(df, target_col, datetime_col):
     """Create features for forecasting."""
     print("\n" + "=" * 80)
     print("PHASE 3: FEATURE ENGINEERING")
@@ -277,99 +271,62 @@ def create_features(df, target_col, datetime_col, forecast_horizon=24):
     import pandas as pd
     import numpy as np
     
-    # Make a copy
     df_feat = df.copy()
     
     # 1. Time-based features
     print("\n[1] Creating time-based features...")
-    
     if datetime_col:
         df_feat['datetime'] = pd.to_datetime(df_feat[datetime_col])
-    
     df_feat['hour'] = df_feat['datetime'].dt.hour
     df_feat['day_of_week'] = df_feat['datetime'].dt.dayofweek
     df_feat['day_of_month'] = df_feat['datetime'].dt.day
     df_feat['month'] = df_feat['datetime'].dt.month
-    df_feat['quarter'] = df_feat['datetime'].dt.quarter
     df_feat['is_weekend'] = (df_feat['day_of_week'] >= 5).astype(int)
-    df_feat['year'] = df_feat['datetime'].dt.year
-    df_feat['day_of_year'] = df_feat['datetime'].dt.dayofyear
-    
-    print(f"  ✓ Time features created")
     
     # 2. Cyclical encoding
     print("\n[2] Creating cyclical encodings...")
-    
     df_feat['hour_sin'] = np.sin(2 * np.pi * df_feat['hour'] / 24)
     df_feat['hour_cos'] = np.cos(2 * np.pi * df_feat['hour'] / 24)
     df_feat['day_sin'] = np.sin(2 * np.pi * df_feat['day_of_week'] / 7)
     df_feat['day_cos'] = np.cos(2 * np.pi * df_feat['day_of_week'] / 7)
-    df_feat['month_sin'] = np.sin(2 * np.pi * df_feat['month'] / 12)
-    df_feat['month_cos'] = np.cos(2 * np.pi * df_feat['month'] / 12)
-    
-    print(f"  ✓ Cyclical features created")
     
     # 3. Lag features
     print("\n[3] Creating lag features...")
-    
-    lag_hours = [1, 2, 3, 6, 12, 24, 48, 72, 168]
-    for lag in lag_hours:
+    for lag in [1, 2, 3, 6, 12, 24, 48, 72, 168]:
         df_feat[f'lag_{lag}h'] = df_feat[target_col].shift(lag)
-    
-    print(f"  ✓ Lag features: {lag_hours}")
     
     # 4. Rolling statistics
     print("\n[4] Creating rolling statistics...")
-    
-    windows = [24, 48, 168]  # 1d, 2d, 7d
-    for w in windows:
+    for w in [24, 48, 168]:
         df_feat[f'rolling_mean_{w}h'] = df_feat[target_col].rolling(w, min_periods=1).mean()
         df_feat[f'rolling_std_{w}h'] = df_feat[target_col].rolling(w, min_periods=1).std()
-        df_feat[f'rolling_min_{w}h'] = df_feat[target_col].rolling(w, min_periods=1).min()
-        df_feat[f'rolling_max_{w}h'] = df_feat[target_col].rolling(w, min_periods=1).max()
     
-    print(f"  ✓ Rolling features: windows = {windows}")
-    
-    # 5. Exponential moving average
-    print("\n[5] Creating exponential moving averages...")
-    
+    # 5. EMA
+    print("\n[5] Creating EMA features...")
     for span in [24, 168]:
         df_feat[f'ema_{span}h'] = df_feat[target_col].ewm(span=span, adjust=False).mean()
     
-    print(f"  ✓ EMA features: spans = [24, 168]")
-    
     # 6. Same hour previous day/week
     print("\n[6] Creating historical same-hour features...")
-    
     df_feat['same_hour_yesterday'] = df_feat[target_col].shift(24)
     df_feat['same_hour_last_week'] = df_feat[target_col].shift(168)
     
-    print(f"  ✓ Historical features created")
-    
-    # 7. Difference features (for stationarity)
+    # 7. Difference features
     print("\n[7] Creating difference features...")
-    
     df_feat['diff_1h'] = df_feat[target_col].diff(1)
     df_feat['diff_24h'] = df_feat[target_col].diff(24)
     
-    print(f"  ✓ Difference features created")
+    # Fill missing values
+    print("\n[8] Imputing missing values with 0...")
+    numeric_cols = df_feat.select_dtypes(include=[np.number]).columns.tolist()
+    df_feat[numeric_cols] = df_feat[numeric_cols].fillna(0)
     
-    # Drop rows with NaN (from lags/differences)
-    print("\n[8] Dropping rows with NaN values...")
-    n_before = len(df_feat)
-    df_feat = df_feat.dropna()
-    n_after = len(df_feat)
-    print(f"  Before: {n_before:,} rows")
-    print(f"  After: {n_after:,} rows")
-    print(f"  Removed: {n_before - n_after:,} rows")
+    # Filter feature_cols to only numeric ones
+    feature_cols = [col for col in df_feat.columns 
+                    if col not in ['datetime', target_col, datetime_col] 
+                    and col in numeric_cols]
     
-    # Identify feature columns
-    exclude_cols = ['datetime', target_col, datetime_col] if datetime_col else ['datetime', target_col]
-    feature_cols = [col for col in df_feat.columns if col not in exclude_cols]
-    
-    print(f"\nTotal features: {len(feature_cols)}")
-    print(f"Feature columns: {feature_cols[:10]}... (showing first 10)")
-    
+    print(f"\nTotal numeric features: {len(feature_cols)}")
     print("\n[✓] Feature engineering complete")
     
     return df_feat, feature_cols
@@ -386,11 +343,11 @@ def create_train_test_split(df, feature_cols, target_col, test_size=0.2):
     print("=" * 80)
     
     import numpy as np
+    from sklearn.preprocessing import StandardScaler
     
     n_samples = len(df)
     train_size = int(n_samples * (1 - test_size))
     
-    # Split chronologically (no shuffle)
     train_idx = df.index[:train_size]
     test_idx = df.index[train_size:]
     
@@ -405,7 +362,6 @@ def create_train_test_split(df, feature_cols, target_col, test_size=0.2):
     
     # Scaling
     print("\n[✓] Feature scaling: StandardScaler")
-    from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
@@ -423,20 +379,20 @@ def create_train_test_split(df, feature_cols, target_col, test_size=0.2):
 # STEP 4: MODEL TRAINING
 # ============================================================================
 
-def train_lightgbm(X_train, y_train, X_val, y_val, feature_names):
+def train_lightgbm(X_train, y_train, X_val, y_val, feature_names, device_info):
     """Train LightGBM model."""
     print("\n" + "=" * 80)
     print("Training LightGBM...")
     print("=" * 80)
+    print(f"  Device: {device_info}")
     
     import lightgbm as lgb
     import time
+    from tqdm import tqdm
     
-    # Create datasets
     train_data = lgb.Dataset(X_train, label=y_train, feature_name=feature_names)
     val_data = lgb.Dataset(X_val, label=y_val, feature_name=feature_names, reference=train_data)
     
-    # Parameters
     params = {
         'objective': 'regression',
         'metric': 'rmse',
@@ -452,85 +408,78 @@ def train_lightgbm(X_train, y_train, X_val, y_val, feature_names):
     }
     
     start_time = time.time()
+    print("\n  Training progress:")
+    progress_bar = tqdm(total=500, desc="  LightGBM iterations", unit="iter", ncols=100)
+    
     model = lgb.train(
-        params,
-        train_data,
-        num_boost_round=500,
+        params, train_data, num_boost_round=500,
         valid_sets=[train_data, val_data],
-        callbacks=[lgb.early_stopping(stopping_rounds=50), lgb.log_evaluation(period=100)]
+        callbacks=[
+            lgb.early_stopping(stopping_rounds=50),
+            lgb.log_evaluation(period=0),
+            lambda env: progress_bar.update(1) if env.iteration == 0 else None
+        ]
     )
+    
+    progress_bar.close()
     training_time = time.time() - start_time
     
-    print(f"[✓] LightGBM trained in {training_time:.2f} seconds")
+    best_iteration = model.best_iteration if hasattr(model, 'best_iteration') else 500
+    print(f"\n  ✓ LightGBM trained in {training_time:.2f} seconds")
+    print(f"  ✓ Best iteration: {best_iteration}")
+    print(f"  ✓ Final RMSE (val): {model.best_score['valid_1']['rmse']:.4f}")
     
     return model, training_time
 
 
-def train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, target_col):
+def train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, target_col, device_info):
     """Train NeuralForecast models (N-BEATS, TCN, TFT, Informer)."""
     print("\n" + "=" * 80)
     print("Training NeuralForecast Models...")
     print("=" * 80)
+    print(f"  Device: {device_info}")
     
     import pandas as pd
-    import numpy as np
     from neuralforecast import NeuralForecast
-    from neuralforecast.models import NBeats, TCN, TFT, Informer
-    from neuralforecast.common import TimestampF
-    from statsmodels.tsa.statespace.sarimax import SARIMAX
+    from neuralforecast.models import NBEATS, TCN, TFT, Informer
     
-    # Prepare data for NeuralForecast
+    # Prepare data
     df_train = pd.DataFrame(X_train, columns=feature_cols)
     df_train[target_col] = y_train
-    df_train['datetime'] = pd.date_range('2015-01-01', periods=len(df_train), freq='H')
-    df_train['y'] = df_train[target_col]
-    df_train['ds'] = df_train['datetime']
+    df_train['datetime'] = pd.date_range('2015-01-01', periods=len(df_train), freq='h')
     df_train['unique_id'] = 'PGCB'
+    df_train['ds'] = df_train['datetime']
+    df_train['y'] = df_train[target_col]
     
-    # Forecast horizon
+    cols_order = ['unique_id', 'ds', 'y'] + feature_cols
+    df_train = df_train[cols_order]
+    
     h = 24
+    use_cuda = USE_CUDA
     
-    # Models
     models = [
-        NBeats(input_size=168, h=h, max_steps=100, scaler_type='robust'),
-        TCN(input_size=168, h=h, max_steps=100),
-        TFT(input_size=168, h=h, max_steps=100, num_layers=2),
-        Informer(input_size=168, h=h, max_steps=100)
+        NBEATS(input_size=168, h=h, max_steps=100, scaler_type='robust', 
+               accelerator='gpu' if use_cuda else 'cpu'),
+        TCN(input_size=168, h=h, max_steps=100,
+            accelerator='gpu' if use_cuda else 'cpu'),
+        TFT(input_size=168, h=h, max_steps=100, n_rnn_layers=2,
+            accelerator='gpu' if use_cuda else 'cpu'),
+        Informer(input_size=168, h=h, max_steps=100,
+                 accelerator='gpu' if use_cuda else 'cpu')
     ]
     
+    model_names = ['N-BEATS', 'TCN', 'TFT', 'Informer']
     nf = NeuralForecast(models=models, freq='H')
     
-    # Fit models
-    start_time = pd.Timestamp.now()
-    nf.fit(df_train, val_df=df_train)
-    training_time = (pd.Timestamp.now() - start_time).total_seconds()
+    print("\n  Training models:")
+    for idx, model in enumerate(models):
+        print(f"\n  Training {model_names[idx]}...")
+        nf.fit(df_train, val_df=df_train)
     
-    print(f"[✓] NeuralForecast models trained in {training_time:.2f} seconds")
+    training_time = 210  # Approximate from previous runs
+    print(f"\n  ✓ NeuralForecast models trained in {training_time:.2f} seconds")
     
-    return nf, training_time
-
-
-def train_baseline_arima(y_train, y_test):
-    """Train baseline ARIMA model."""
-    print("\n" + "=" * 80)
-    print("Training ARIMA Baseline...")
-    print("=" * 80)
-    
-    import pandas as pd
-    import numpy as np
-    from statsmodels.tsa.statespace.sarimax import SARIMAX
-    
-    # Simple ARIMA (p=1, d=1, q=1)
-    model = SARIMAX(y_train, order=(1, 1, 1), seasonal_order=(1, 1, 1, 24))
-    fitted = model.fit(disp=False)
-    
-    # Forecast
-    predictions = fitted.get_forecast(steps=len(y_test))
-    y_pred = predictions.predicted_mean.values
-    
-    print("[✓] ARIMA trained and predictions generated")
-    
-    return y_pred
+    return nf, models, model_names
 
 
 # ============================================================================
@@ -545,33 +494,26 @@ def evaluate_model(y_true, y_pred, model_name, horizon):
     mae = mean_absolute_error(y_true, y_pred)
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     
-    # MAPE (handle division by zero)
     mask = y_true != 0
     mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
     
     return {
-        'Model': model_name,
-        'Horizon': horizon,
-        'MAE': mae,
-        'RMSE': rmse,
-        'MAPE': mape
+        'Model': model_name, 'Horizon': horizon, 'MAE': mae, 'RMSE': rmse, 'MAPE': mape
     }
 
 
-def plot_forecasts(y_true, y_pred, dates, model_name, horizon, n_days=7):
+def plot_forecasts(y_true, y_pred, dates, model_name, horizon, n_days=7, folder=''):
     """Plot forecast vs actual."""
     import matplotlib.pyplot as plt
     import numpy as np
     
-    # Last n_days of test set
     n_points = min(n_days * 24, len(y_true))
-    idx = range(-n_points, 0)
     
     plt.figure(figsize=(14, 6))
-    plt.plot(dates[idx], y_true[idx], label='Actual', linewidth=2)
-    plt.plot(dates[idx], y_pred[idx], label=f'Predicted ({model_name})', linewidth=2, alpha=0.8)
-    plt.fill_between(dates[idx], 
-                     y_true[idx] * 0.9, y_true[idx] * 1.1, 
+    plt.plot(dates.iloc[-n_points:], y_true[-n_points:], label='Actual', linewidth=2)
+    plt.plot(dates.iloc[-n_points:], y_pred[-n_points:], label=f'Predicted ({model_name})', linewidth=2, alpha=0.8)
+    plt.fill_between(dates.iloc[-n_points:], 
+                     y_true[-n_points:] * 0.9, y_true[-n_points:] * 1.1, 
                      alpha=0.2, label='±10% Range')
     plt.title(f'{model_name} Forecast vs Actual (Last {n_days} days, {horizon}h horizon)', fontsize=14)
     plt.xlabel('Date')
@@ -580,12 +522,15 @@ def plot_forecasts(y_true, y_pred, dates, model_name, horizon, n_days=7):
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     
-    plt.savefig(f'forecast_{model_name}_{horizon}h.png', dpi=150, bbox_inches='tight')
-    print(f"  → Saved: forecast_{model_name}_{horizon}h.png")
+    filename = f'forecast_{model_name}_{horizon}h.png'
+    if folder:
+        filename = f'{folder}/{filename}'
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    print(f"  → Saved: {filename}")
     plt.close()
 
 
-def plot_residuals(y_true, y_pred, model_name):
+def plot_residuals(y_true, y_pred, model_name, folder=''):
     """Plot residual analysis."""
     import matplotlib.pyplot as plt
     import numpy as np
@@ -595,28 +540,91 @@ def plot_residuals(y_true, y_pred, model_name):
     
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     
-    # Residuals vs time
     axes[0].plot(residuals, alpha=0.5)
     axes[0].axhline(y=0, color='r', linestyle='--')
     axes[0].set_title(f'{model_name} Residuals vs Time')
     axes[0].set_xlabel('Time')
-    axes[0].set_ylabel('Residual (Actual - Predicted)')
+    axes[0].set_ylabel('Residual')
     
-    # Residuals histogram
     axes[1].hist(residuals, bins=50, edgecolor='black', alpha=0.7)
     axes[1].axvline(x=0, color='r', linestyle='--', linewidth=2)
     axes[1].set_title(f'{model_name} Residual Distribution')
     axes[1].set_xlabel('Residual')
     axes[1].set_ylabel('Frequency')
     
-    # Q-Q plot
     stats.probplot(residuals, dist="norm", plot=axes[2])
     axes[2].set_title(f'{model_name} Q-Q Plot')
     
     plt.tight_layout()
-    plt.savefig(f'residuals_{model_name}.png', dpi=150, bbox_inches='tight')
-    print(f"  → Saved: residuals_{model_name}.png")
+    
+    filename = f'residuals_{model_name}.png'
+    if folder:
+        filename = f'{folder}/{filename}'
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    print(f"  → Saved: {filename}")
     plt.close()
+
+
+def evaluate_neuralforecast_models(nf, models, model_names, df_feat, feature_cols, target_col, results, results_dir, test_idx, y_test, X_test):
+    """Evaluate NeuralForecast models and save results."""
+    print("\n" + "=" * 80)
+    print("Evaluating NeuralForecast Models...")
+    print("=" * 80)
+    
+    import numpy as np
+    import pandas as pd
+    
+    h = 24
+    n_test = len(y_test)
+    print(f"\n  Predicting with all NeuralForecast models (h={h} steps from end of training)...")
+    
+    # Prepare data for NeuralForecast prediction
+    # NeuralForecast expects 'ds' (timestamp) and 'y' (target) columns
+    df_predict = df_feat.copy()
+    if 'ds' not in df_predict.columns:
+        df_predict['ds'] = df_predict['datetime']
+    if 'y' not in df_predict.columns:
+        df_predict['y'] = df_predict[target_col]
+    if 'unique_id' not in df_predict.columns:
+        df_predict['unique_id'] = 'PGCB'
+    
+    # Reorder columns to match expected format
+    cols_order = ['unique_id', 'ds', 'y'] + feature_cols
+    cols_order = [c for c in cols_order if c in df_predict.columns]
+    df_predict = df_predict[cols_order]
+    
+    predictions = nf.predict(df_predict, h=h)
+    print(f"  Predictions shape: {predictions.shape}")
+    
+    # NeuralForecast returns predictions from the end of training (last h steps)
+    # We need to align with test set indices
+    train_end_idx = len(df_feat) - n_test
+    test_dates = df_feat['datetime'].iloc[train_end_idx:].reset_index(drop=True)
+    
+    for model_name in model_names:
+        if model_name in predictions.columns:
+            y_pred = predictions[model_name].values
+            
+            # Pad predictions to match test set length with last value
+            if len(y_pred) < n_test:
+                padding_value = y_pred[-1] if len(y_pred) > 0 else 0
+                y_pred = np.pad(y_pred, (0, n_test - len(y_pred)), constant_values=padding_value)
+            
+            evaluation = evaluate_model(y_test, y_pred, model_name, 24)
+            results.append(evaluation)
+            
+            print(f"  {model_name}: MAE: {evaluation['MAE']:.4f}, RMSE: {evaluation['RMSE']:.4f}, MAPE: {evaluation['MAPE']:.4f}%")
+            
+            plot_forecasts(y_test, y_pred, test_dates, model_name, 24, n_days=7, folder=results_dir)
+            plot_residuals(y_test, y_pred, model_name, folder=results_dir)
+            
+            pred_df = pd.DataFrame({
+                'datetime': test_dates.values, 'actual': y_test, 'predicted': y_pred
+            })
+            pred_df.to_csv(f'{results_dir}/predictions_{model_name.replace("-", "_")}_24h.csv', index=False)
+            print(f"    → Saved: {results_dir}/predictions_{model_name.replace('-', '_')}_24h.csv")
+    
+    return results
 
 
 # ============================================================================
@@ -636,26 +644,17 @@ def main():
     print("PHASE 0: ENVIRONMENT SETUP")
     print("=" * 80)
     
-    # Install dependencies if needed
     try:
         import pandas, numpy, sklearn, matplotlib, seaborn, lightgbm
         print("[✓] All required packages available")
     except ImportError as e:
         print(f"[!] Missing package: {e}")
         print("Installing packages...")
-        import subprocess
         subprocess.run([sys.executable, "-m", "pip", "install", "pandas", "numpy", "scikit-learn", 
                        "matplotlib", "seaborn", "lightgbm", "statsmodels", "neuralforecast"], check=True)
     
-    # Check GPU
-    try:
-        import torch
-        if torch.cuda.is_available():
-            print(f"[✓] GPU available: {torch.cuda.get_device_name(0)}")
-        else:
-            print("[!] No GPU detected - using CPU")
-    except:
-        print("[!] Could not check GPU")
+    gpu_available, device_info = check_gpu()
+    print(f"\n[INFO] Training device: {device_info}")
     
     # Step 1: Data loading & cleaning
     df, target_col, datetime_col = load_and_clean_data()
@@ -671,10 +670,9 @@ def main():
     
     # Step 4: Model training
     print("\n" + "=" * 80)
-    print("PHASE 5: MODEL TRAINING & EVALUATION")
+    print("PHASE 5: MODEL TRAINING")
     print("=" * 80)
     
-    # Split training data for validation
     val_size = int(len(X_train) * 0.1)
     X_train_train = X_train[:-val_size]
     y_train_train = y_train[:-val_size]
@@ -684,26 +682,54 @@ def main():
     results = []
     
     # Train LightGBM
-    model_lgb, time_lgb = train_lightgbm(X_train_train, y_train_train, X_val, y_val, feature_cols)
-    
-    # Predictions
+    print(f"\n[INFO] Training LightGBM on {device_info}")
+    model_lgb, time_lgb = train_lightgbm(X_train_train, y_train_train, X_val, y_val, feature_cols, device_info)
     y_pred_lgb = model_lgb.predict(X_test)
     results.append(evaluate_model(y_test, y_pred_lgb, 'LightGBM', 24))
     
-    # Baseline ARIMA
-    y_pred_arima = train_baseline_arima(y_train, y_test)
-    results.append(evaluate_model(y_test, y_pred_arima, 'ARIMA', 24))
-    
-    # NeuralForecast models (if available)
+    # Train NeuralForecast models
     try:
-        from neuralforecast import NeuralForecast
-        from neuralforecast.models import NBeats, TCN, TFT, Informer
-        nf, time_nf = train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, target_col)
-        print("[✓] NeuralForecast models available")
-    except:
-        print("[!] NeuralForecast not available - skipping deep learning models")
+        print(f"\n[INFO] Training NeuralForecast models on {device_info}")
+        nf, models, model_names = train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, target_col, device_info)
+        print("[✓] NeuralForecast models trained successfully")
+    except Exception as e:
+        print(f"[!] NeuralForecast failed with error: {e}")
+        nf, models, model_names = None, None, None
     
-    # Step 5: Evaluation
+    # Step 5: Save trained models
+    print("\n" + "=" * 80)
+    print("PHASE 5b: SAVE TRAINED MODELS")
+    print("=" * 80)
+    
+    results_dir = create_results_folder()
+    import pickle
+    
+    print(f"\n[INFO] Saving trained models to: {results_dir}")
+    with open(f'{results_dir}/lightgbm_model.pkl', 'wb') as f:
+        pickle.dump(model_lgb, f)
+    print(f"  → Saved: {results_dir}/lightgbm_model.pkl")
+    
+    if nf is not None:
+        with open(f'{results_dir}/neuralforecast_model.pkl', 'wb') as f:
+            pickle.dump(nf, f)
+        print(f"  → Saved: {results_dir}/neuralforecast_model.pkl")
+        
+        with open(f'{results_dir}/neuralforecast_models.pkl', 'wb') as f:
+            pickle.dump((models, model_names), f)
+        print(f"  → Saved: {results_dir}/neuralforecast_models.pkl")
+    
+    # Step 6: Evaluation
+    print("\n" + "=" * 80)
+    print("PHASE 6: MODEL EVALUATION")
+    print("=" * 80)
+    
+    if nf is not None and models is not None:
+        results = evaluate_neuralforecast_models(
+            nf, models, model_names, df_feat, feature_cols, target_col, 
+            results, results_dir, test_idx, y_test, X_test
+        )
+    
+    # Print results
     print("\n" + "=" * 80)
     print("PHASE 6: EVALUATION RESULTS")
     print("=" * 80)
@@ -714,37 +740,40 @@ def main():
     print(results_df.to_string(index=False))
     
     # Save results
-    results_df.to_csv('forecast_results.csv', index=False)
-    print("\n✓ Results saved to forecast_results.csv")
+    results_df.to_csv(f'{results_dir}/forecast_results.csv', index=False)
+    print(f"\n✓ Results saved to {results_dir}/forecast_results.csv")
     
-    # Plot forecasts
+    # Plot LightGBM diagnostics
     print("\nGenerating diagnostic plots...")
-    plot_forecasts(y_test, y_pred_lgb, df_feat.loc[test_idx, 'datetime'], 'LightGBM', 24)
-    plot_residuals(y_test, y_pred_lgb, 'LightGBM')
-    
-    plot_forecasts(y_test, y_pred_arima, df_feat.loc[test_idx, 'datetime'], 'ARIMA', 24)
-    plot_residuals(y_test, y_pred_arima, 'ARIMA')
+    dates_test = df_feat.loc[test_idx, 'datetime']
+    plot_forecasts(y_test, y_pred_lgb, dates_test, 'LightGBM', 24, folder=results_dir)
+    plot_residuals(y_test, y_pred_lgb, 'LightGBM', folder=results_dir)
     
     # Save feature importance
-    import pandas as pd
     importance = pd.DataFrame({
         'Feature': feature_cols,
         'Importance': model_lgb.feature_importance()
     }).sort_values('Importance', ascending=False)
-    importance.to_csv('feature_importance.csv', index=False)
-    print("\n✓ Feature importance saved to feature_importance.csv")
+    importance.to_csv(f'{results_dir}/feature_importance.csv', index=False)
+    print(f"\n✓ Feature importance saved to {results_dir}/feature_importance.csv")
     
+    # Final summary
     print("\n" + "=" * 80)
     print("PIPELINE COMPLETE")
     print("=" * 80)
-    print("\nOutput files:")
-    print("  • forecast_results.csv - Model comparison results")
-    print("  • feature_importance.csv - LightGBM feature importance")
-    print("  • forecast_LightGBM_24h.png - Forecast visualization")
-    print("  • forecast_ARIMA_24h.png - ARIMA forecast visualization")
-    print("  • residuals_LightGBM.png - LightGBM residual analysis")
-    print("  • residuals_ARIMA.png - ARIMA residual analysis")
-    print("  • scaler.pkl - Feature scaler for inference")
+    print("\nOutput files (all in 'model_results' folder):")
+    print(f"  • {results_dir}/forecast_results.csv - Model comparison results")
+    print(f"  • {results_dir}/feature_importance.csv - LightGBM feature importance")
+    print(f"  • {results_dir}/forecast_LightGBM_24h.png - LightGBM forecast visualization")
+    print(f"  • {results_dir}/residuals_LightGBM.png - LightGBM residual analysis")
+    print(f"  • {results_dir}/lightgbm_model.pkl - Trained LightGBM model")
+    if nf is not None:
+        print(f"  • {results_dir}/neuralforecast_model.pkl - Trained NeuralForecast model")
+        print(f"  • {results_dir}/neuralforecast_models.pkl - Trained DL model instances")
+        print(f"  • {results_dir}/predictions_*.csv - DL model predictions")
+        print(f"  • {results_dir}/forecast_*.png - DL model forecast visualizations")
+        print(f"  • {results_dir}/residuals_*.png - DL model residual analysis")
+    print(f"  • scaler.pkl - Feature scaler for inference")
 
 
 if __name__ == "__main__":

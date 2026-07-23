@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.local
+
+# Models and weights (large files)
+*.h5
+*.keras
+*.pkl
+*.pkl.gz
+*.pkl.zip
+*.joblib
+*.pt
+*.pth
+*.bin
+*.onnx
+*.pb
+
+# Logs
+*.log
+logs/
+lightning_logs/
+
+# Output files
+EDA_Output/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+
+# Data files (large datasets)
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
