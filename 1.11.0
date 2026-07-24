@@ -1,7 +1,0 @@
-Requirement already satisfied: pandas in .\venv\Lib\site-packages (2.3.3)
-Requirement already satisfied: numpy in .\venv\Lib\site-packages (2.5.1)
-Requirement already satisfied: scipy in .\venv\Lib\site-packages (1.18.0)
-Requirement already satisfied: python-dateutil>=2.8.2 in .\venv\Lib\site-packages (from pandas) (2.9.0.post0)
-Requirement already satisfied: pytz>=2020.1 in .\venv\Lib\site-packages (from pandas) (2026.2)
-Requirement already satisfied: tzdata>=2022.7 in .\venv\Lib\site-packages (from pandas) (2026.3)
-Requirement already satisfied: six>=1.5 in .\venv\Lib\site-packages (from python-dateutil>=2.8.2->pandas) (1.17.0)
