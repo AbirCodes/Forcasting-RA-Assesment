@@ -213,8 +213,16 @@ def clean_data(df, target_col):
         df_clean[target_col] = df_clean[target_col].fillna(0)
         print(f"  Applied: Imputed missing values with 0")
     
-    # 4. Handle missing values in ALL columns
+    # 4. Handle missing values in ALL columns - FIX FOR DATA LEAKAGE
+    # Calculate statistics from training data only to avoid data leakage
     print(f"\n[4] Seasonal-aware imputation for all numeric columns...")
+    
+    # First, determine train/test split for feature engineering
+    # Use 85% as training data for imputation statistics
+    n_samples = len(df_clean)
+    train_size = int(n_samples * 0.85)
+    train_data = df_clean.iloc[:train_size].copy()
+    test_data = df_clean.iloc[train_size:].copy()
     
     numeric_cols = df_clean.select_dtypes(include=[np.number]).columns.tolist()
     if target_col in numeric_cols:
@@ -229,20 +237,31 @@ def clean_data(df, target_col):
         if missing_count == 0:
             continue
         
-        # Use same-hour-yesterday imputation (24h lag)
+        # Use same-hour-yesterday imputation (24h lag) on FULL data first
+        # This is OK because we're using PAST values (lag)
         df_clean[col] = impute_with_lag(df_clean[col], lag=24)
         
-        # Forward/backward fill remaining
-        df_clean[col] = df_clean[col].fillna(method='ffill').fillna(method='bfill')
+        # FORWARD FILL ONLY within training data (prevents leakage)
+        train_values = df_clean.iloc[:train_size][col]
+        train_ffilled = train_values.fillna(method='ffill')
+        df_clean.loc[:train_size-1, col] = train_ffilled
+        
+        # BACKWARD FILL ONLY within test data (use train median for initial fill)
+        test_values = df_clean.iloc[train_size:][col]
+        # First, fill test with last train value to avoid leakage
+        last_train_val = train_ffilled.iloc[-1] if len(train_ffilled) > 0 else df_clean[col].median()
+        test_with_start = test_values.fillna(last_train_val)
+        test_bfilled = test_with_start.fillna(method='bfill')
+        df_clean.loc[train_size:, col] = test_bfilled
         
         # Set negative values to 0
         negative_count = (df_clean[col] < 0).sum()
         if negative_count > 0:
             df_clean.loc[df_clean[col] < 0, col] = 0
         
-        # Cap at historical range
-        Q1 = df_clean[col].quantile(0.25)
-        Q3 = df_clean[col].quantile(0.75)
+        # Cap at historical range (use train data statistics)
+        Q1 = train_data[col].quantile(0.25)
+        Q3 = train_data[col].quantile(0.75)
         IQR = Q3 - Q1
         upper_bound = Q3 + 3 * IQR
         
@@ -251,7 +270,7 @@ def clean_data(df, target_col):
             df_clean.loc[df_clean[col] > upper_bound, col] = upper_bound
         
         final_missing = df_clean[col].isnull().sum()
-        print(f"    ✓ {col}: 24h-lag imputation (missing: {missing_count} → {final_missing})")
+        print(f"    ✓ {col}: 24h-lag + train-only imputation (missing: {missing_count} → {final_missing})")
     
     # 5. Handle outliers
     print(f"\n[5] Outlier handling for {target_col}:")
@@ -286,7 +305,7 @@ def impute_with_lag(series, lag=24):
 # STEP 2: FEATURE ENGINEERING
 # ============================================================================
 
-def create_features(df, target_col, datetime_col):
+def create_features(df, target_col, datetime_col, train_size=None):
     """Create features for forecasting."""
     print("\n" + "=" * 80)
     print("PHASE 3: FEATURE ENGINEERING")
@@ -319,13 +338,13 @@ def create_features(df, target_col, datetime_col):
     for lag in [1, 2, 3, 6, 12, 24, 48, 72, 168]:
         df_feat[f'lag_{lag}h'] = df_feat[target_col].shift(lag)
     
-    # 4. Rolling statistics
+    # 4. Rolling statistics - using full data is OK for time-series (past values only)
     print("\n[4] Creating rolling statistics...")
     for w in [24, 48, 168]:
         df_feat[f'rolling_mean_{w}h'] = df_feat[target_col].rolling(w, min_periods=1).mean()
         df_feat[f'rolling_std_{w}h'] = df_feat[target_col].rolling(w, min_periods=1).std()
     
-    # 5. EMA
+    # 5. EMA - using full data is OK for time-series (past values only)
     print("\n[5] Creating EMA features...")
     for span in [24, 168]:
         df_feat[f'ema_{span}h'] = df_feat[target_col].ewm(span=span, adjust=False).mean()
@@ -340,7 +359,7 @@ def create_features(df, target_col, datetime_col):
     df_feat['diff_1h'] = df_feat[target_col].diff(1)
     df_feat['diff_24h'] = df_feat[target_col].diff(24)
     
-    # Fill missing values
+    # Fill missing values with 0
     print("\n[8] Imputing missing values with 0...")
     numeric_cols = df_feat.select_dtypes(include=[np.number]).columns.tolist()
     df_feat[numeric_cols] = df_feat[numeric_cols].fillna(0)
@@ -384,11 +403,11 @@ def create_train_test_split(df, feature_cols, target_col, test_size=0.2):
     print(f"    Train shape: X={X_train.shape}, y={y_train.shape}")
     print(f"    Test shape: X={X_test.shape}, y={y_test.shape}")
     
-    # Scaling
+    # Scaling - using ONLY training data statistics (NO LEAKAGE)
     print("\n[✓] Feature scaling: StandardScaler")
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+    X_train_scaled = scaler.fit_transform(X_train)  # Fit on train ONLY
+    X_test_scaled = scaler.transform(X_test)        # Transform test using train stats
     
     # Save scaler
     import pickle
