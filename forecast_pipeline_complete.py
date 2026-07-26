@@ -243,7 +243,7 @@ def clean_data(df, target_col):
         
         # FORWARD FILL ONLY within training data (prevents leakage)
         train_values = df_clean.iloc[:train_size][col]
-        train_ffilled = train_values.fillna(method='ffill')
+        train_ffilled = train_values.ffill()
         df_clean.loc[:train_size-1, col] = train_ffilled
         
         # BACKWARD FILL ONLY within test data (use train median for initial fill)
@@ -251,7 +251,7 @@ def clean_data(df, target_col):
         # First, fill test with last train value to avoid leakage
         last_train_val = train_ffilled.iloc[-1] if len(train_ffilled) > 0 else df_clean[col].median()
         test_with_start = test_values.fillna(last_train_val)
-        test_bfilled = test_with_start.fillna(method='bfill')
+        test_bfilled = test_with_start.bfill()
         df_clean.loc[train_size:, col] = test_bfilled
         
         # Set negative values to 0
@@ -672,6 +672,198 @@ def evaluate_neuralforecast_models(nf, models, model_names, df_feat, feature_col
 
 
 # ============================================================================
+# HELPER FUNCTIONS FOR LONG-HORIZON FORECASTING
+# ============================================================================
+
+def generate_lightgbm_forecast(model, scaler, df_feat, feature_cols, target_col, datetime_col, horizon):
+    """Generate LightGBM forecast for specified horizon."""
+    import pandas as pd
+    import numpy as np
+    
+    print(f"\n[INFO] Generating LightGBM forecast for {horizon} hours...")
+    
+    # Get the last known data point
+    last_row = df_feat.iloc[-1].copy()
+    last_datetime = pd.to_datetime(last_row[datetime_col])
+    
+    # Initialize forecast dataframe
+    forecast_records = []
+    last_actual = last_row[target_col]
+    
+    # Iterate through each hour in the forecast horizon
+    for h in range(1, horizon + 1):
+        forecast_datetime = last_datetime + pd.Timedelta(hours=h)
+        
+        # Create feature row for this forecast
+        feat_row = df_feat.iloc[-1:].copy()
+        feat_row['datetime'] = forecast_datetime
+        feat_row['hour'] = forecast_datetime.hour
+        feat_row['day_of_week'] = forecast_datetime.dayofweek
+        feat_row['day_of_month'] = forecast_datetime.day
+        feat_row['month'] = forecast_datetime.month
+        feat_row['is_weekend'] = 1 if forecast_datetime.dayofweek >= 5 else 0
+        feat_row['hour_sin'] = np.sin(2 * np.pi * forecast_datetime.hour / 24)
+        feat_row['hour_cos'] = np.cos(2 * np.pi * forecast_datetime.hour / 24)
+        feat_row['day_sin'] = np.sin(2 * np.pi * forecast_datetime.dayofweek / 7)
+        feat_row['day_cos'] = np.cos(2 * np.pi * forecast_datetime.dayofweek / 7)
+        
+        # Update lag features with recent forecasts
+        for lag in [1, 2, 3, 6, 12, 24, 48, 72, 168]:
+            if h > lag:
+                # Use forecasted value for past lags
+                lag_idx = len(forecast_records) - lag
+                if lag_idx >= 0:
+                    feat_row[f'lag_{lag}h'] = forecast_records[lag_idx]['predicted']
+                else:
+                    feat_row[f'lag_{lag}h'] = last_actual
+            else:
+                feat_row[f'lag_{lag}h'] = last_actual
+        
+        # Update rolling statistics
+        for w in [24, 48, 168]:
+            recent_values = [last_actual] + [r['predicted'] for r in forecast_records[-(w-1):]]
+            if len(recent_values) >= w:
+                feat_row[f'rolling_mean_{w}h'] = np.mean(recent_values[-w:])
+                feat_row[f'rolling_std_{w}h'] = np.std(recent_values[-w:])
+            else:
+                feat_row[f'rolling_mean_{w}h'] = last_actual
+                feat_row[f'rolling_std_{w}h'] = 0
+        
+        # Update EMA
+        for span in [24, 168]:
+            feat_row[f'ema_{span}h'] = last_actual
+        
+        # Update same hour previous day/week
+        if h > 24:
+            feat_row['same_hour_yesterday'] = forecast_records[-24]['predicted']
+        else:
+            feat_row['same_hour_yesterday'] = last_actual
+            
+        if h > 168:
+            feat_row['same_hour_last_week'] = forecast_records[-168]['predicted']
+        else:
+            feat_row['same_hour_last_week'] = last_actual
+        
+        # Update difference features
+        feat_row['diff_1h'] = 0
+        feat_row['diff_24h'] = 0
+        
+        # Prepare features for prediction
+        X_forecast = feat_row[feature_cols].values.reshape(1, -1)
+        X_forecast_scaled = scaler.transform(X_forecast)
+        
+        # Predict
+        predicted = model.predict(X_forecast_scaled)[0]
+        
+        # Ensure non-negative
+        predicted = max(0, predicted)
+        
+        # Store record
+        forecast_records.append({
+            'datetime': forecast_datetime,
+            'actual': np.nan,  # No actual values for future
+            'predicted': predicted
+        })
+        
+        # Update last actual for next iteration
+        last_actual = predicted
+        
+        # Progress display
+        if h % 1000 == 0:
+            print(f"  Forecasted {h:,}/{horizon:,} hours ({h/horizon*100:.1f}%)")
+    
+    # Convert to DataFrame
+    forecast_df = pd.DataFrame(forecast_records)
+    return forecast_df
+
+
+def generate_nhits_forecast(nf, df_feat, feature_cols, target_col, horizon):
+    """Generate N-HiTS forecast for specified horizon."""
+    import pandas as pd
+    import numpy as np
+    
+    print(f"\n[INFO] Generating N-HiTS forecast for {horizon} hours...")
+    
+    # Prepare data for NeuralForecast
+    df_predict = df_feat.copy()
+    if 'ds' not in df_predict.columns:
+        df_predict['ds'] = df_predict['datetime']
+    if 'y' not in df_predict.columns:
+        df_predict['y'] = df_predict[target_col]
+    if 'unique_id' not in df_predict.columns:
+        df_predict['unique_id'] = 'PGCB'
+    
+    cols_order = ['unique_id', 'ds', 'y'] + feature_cols
+    cols_order = [c for c in cols_order if c in df_predict.columns]
+    df_predict = df_predict[cols_order]
+    
+    # Get last timestamp
+    last_datetime = df_predict['ds'].iloc[-1]
+    
+    # Generate future timestamps
+    future_dates = pd.date_range(start=last_datetime + pd.Timedelta(hours=1), 
+                                  periods=horizon, freq='h')
+    
+    # Create future dataframe with exogenous features
+    future_df = pd.DataFrame({
+        'unique_id': ['PGCB'] * horizon,
+        'ds': future_dates,
+        'y': [np.nan] * horizon
+    })
+    
+    # Add time-based features for future dates
+    future_df['hour'] = future_df['ds'].dt.hour
+    future_df['day_of_week'] = future_df['ds'].dt.dayofweek
+    future_df['day_of_month'] = future_df['ds'].dt.day
+    future_df['month'] = future_df['ds'].dt.month
+    future_df['is_weekend'] = (future_df['day_of_week'] >= 5).astype(int)
+    future_df['hour_sin'] = np.sin(2 * np.pi * future_df['hour'] / 24)
+    future_df['hour_cos'] = np.cos(2 * np.pi * future_df['hour'] / 24)
+    future_df['day_sin'] = np.sin(2 * np.pi * future_df['day_of_week'] / 7)
+    future_df['day_cos'] = np.cos(2 * np.pi * future_df['day_of_week'] / 7)
+    
+    # Add lag features using past data
+    for lag in [1, 2, 3, 6, 12, 24, 48, 72, 168]:
+        lag_col = f'lag_{lag}h'
+        if lag_col in df_predict.columns:
+            # Get last values from training data
+            last_values = df_predict[lag_col].iloc[-lag:].values
+            if len(last_values) < lag:
+                last_values = np.pad(last_values, (0, lag - len(last_values)), 
+                                     mode='edge')
+            future_df[lag_col] = last_values[-1]
+    
+    # Combine past and future for prediction
+    df_combined = pd.concat([df_predict, future_df], ignore_index=True)
+    
+    # Predict with NeuralForecast
+    try:
+        predictions = nf.predict(df_combined, h=horizon)
+        
+        # Create forecast dataframe
+        forecast_df = pd.DataFrame({
+            'datetime': future_dates,
+            'actual': [np.nan] * horizon,
+            'predicted': predictions['NHITS'].values
+        })
+        
+        # Ensure non-negative
+        forecast_df['predicted'] = forecast_df['predicted'].clip(lower=0)
+        
+        return forecast_df
+    except Exception as e:
+        print(f"[!] NHITS prediction failed: {e}")
+        # Fallback: create simple forecast using last value
+        last_value = df_predict['y'].iloc[-1]
+        forecast_df = pd.DataFrame({
+            'datetime': future_dates,
+            'actual': [np.nan] * horizon,
+            'predicted': [last_value] * horizon
+        })
+        return forecast_df
+
+
+# ============================================================================
 # MAIN PIPELINE EXECUTION
 # ============================================================================
 
@@ -789,11 +981,21 @@ def main():
     results_df.to_csv(f'{results_dir}/forecast_results.csv', index=False)
     print(f"\n✓ Results saved to {results_dir}/forecast_results.csv")
     
-    # Plot LightGBM diagnostics
+    # Plot LightGBM diagnostics (define dates_test first)
     print("\nGenerating diagnostic plots...")
     dates_test = df_feat.loc[test_idx, 'datetime']
     plot_forecasts(y_test, y_pred_lgb, dates_test, 'LightGBM', 24, folder=results_dir)
     plot_residuals(y_test, y_pred_lgb, 'LightGBM', folder=results_dir)
+    
+    # Save LightGBM predictions CSV (matching NHITS format)
+    print("\n[INFO] Saving LightGBM predictions CSV...")
+    pred_lgb_df = pd.DataFrame({
+        'datetime': dates_test.values,
+        'actual': y_test,
+        'predicted': y_pred_lgb
+    })
+    pred_lgb_df.to_csv(f'{results_dir}/predictions_LightGBM_24h.csv', index=False)
+    print(f"  → Saved: {results_dir}/predictions_LightGBM_24h.csv")
     
     # Save feature importance
     importance = pd.DataFrame({
@@ -819,7 +1021,64 @@ def main():
         print(f"  • {results_dir}/predictions_NHITS_24h.csv - NHITS forecast results")
         print(f"  • {results_dir}/forecast_NHITS_24h.png - NHITS forecast visualization")
         print(f"  • {results_dir}/residuals_NHITS.png - NHITS residual analysis")
+    print(f"  • {results_dir}/predictions_LightGBM_24h.csv - LightGBM forecast results")
     print(f"  • scaler.pkl - Feature scaler for inference")
+    
+    # Step 7: Generate 5-year forecasts for both models
+    print("\n" + "=" * 80)
+    print("PHASE 7: GENERATING 5-YEAR FORECASTS")
+    print("=" * 80)
+    
+    # Generate 5-year (1825 days × 24 hours = 43800 hours) forecasts
+    horizon_5year = 43800  # 1825 days * 24 hours
+    
+    # 5-year LightGBM forecast
+    try:
+        print(f"\n[INFO] Generating 5-year LightGBM forecast (horizon={horizon_5year} hours)...")
+        lgb_forecast_5y = generate_lightgbm_forecast(model_lgb, scaler, df_feat, feature_cols, 
+                                                      target_col, datetime_col, horizon_5year)
+        lgb_forecast_5y.to_csv(f'{results_dir}/forecast_LightGBM_5year.csv', index=False)
+        print(f"  → Saved: {results_dir}/forecast_LightGBM_5year.csv")
+        
+        # Also save in prediction format
+        pred_5y_df = pd.DataFrame({
+            'datetime': lgb_forecast_5y['datetime'],
+            'actual': lgb_forecast_5y['actual'],
+            'predicted': lgb_forecast_5y['predicted']
+        })
+        pred_5y_df.to_csv(f'{results_dir}/predictions_LightGBM_5year.csv', index=False)
+        print(f"  → Saved: {results_dir}/predictions_LightGBM_5year.csv")
+    except Exception as e:
+        print(f"[!] LightGBM 5-year forecast failed: {e}")
+    
+    # 5-year NHITS forecast
+    if nf is not None:
+        try:
+            print(f"\n[INFO] Generating 5-year NHITS forecast (horizon={horizon_5year} hours)...")
+            nhits_forecast_5y = generate_nhits_forecast(nf, df_feat, feature_cols, 
+                                                         target_col, horizon_5year)
+            nhits_forecast_5y.to_csv(f'{results_dir}/forecast_NHITS_5year.csv', index=False)
+            print(f"  → Saved: {results_dir}/forecast_NHITS_5year.csv")
+            
+            # Also save in prediction format
+            pred_5y_df = pd.DataFrame({
+                'datetime': nhits_forecast_5y['datetime'],
+                'actual': nhits_forecast_5y['actual'],
+                'predicted': nhits_forecast_5y['predicted']
+            })
+            pred_5y_df.to_csv(f'{results_dir}/predictions_NHITS_5year.csv', index=False)
+            print(f"  → Saved: {results_dir}/predictions_NHITS_5year.csv")
+        except Exception as e:
+            print(f"[!] NHITS 5-year forecast failed: {e}")
+    
+    print("\n" + "=" * 80)
+    print("ALL FORECASTING COMPLETE")
+    print("=" * 80)
+    print("\nAdditional output files for 5-year forecasts:")
+    print(f"  • {results_dir}/forecast_LightGBM_5year.csv - LightGBM 5-year forecast details")
+    print(f"  • {results_dir}/forecast_NHITS_5year.csv - NHITS 5-year forecast details")
+    print(f"  • {results_dir}/predictions_LightGBM_5year.csv - LightGBM 5-year predictions")
+    print(f"  • {results_dir}/predictions_NHITS_5year.csv - NHITS 5-year predictions")
 
 
 if __name__ == "__main__":
