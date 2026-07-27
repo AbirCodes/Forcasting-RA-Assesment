@@ -507,10 +507,8 @@ def train_neuralforecast_models(X_train, y_train, X_val, y_val, df_feat, feature
             input_size=168, 
             h=h, 
             max_steps=500,  # Increased from 100 to 500 for proper convergence
-            early_stopping_steps=50,  # Added early stopping
             scaler_type='robust',
-            accelerator='gpu' if use_cuda else 'cpu',
-            learning_rate=1e-3  # Explicit learning rate
+            accelerator='gpu' if use_cuda else 'cpu'
         )
     ]
     
