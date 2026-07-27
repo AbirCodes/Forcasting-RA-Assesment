@@ -1038,6 +1038,34 @@ def main():
     print(f"  • {results_dir}/predictions_LightGBM_24h.csv - LightGBM 24-hour predictions")
     print(f"  • scaler.pkl - Feature scaler for inference")
     
+    # Step 7: Generate next 24-hour forecasts
+    print("\n" + "=" * 80)
+    print("PHASE 7: GENERATING NEXT 24-HOUR FORECASTS")
+    print("=" * 80)
+    
+    horizon_24h = 24  # Next 24 hours
+    
+    # LightGBM 24-hour forecast
+    try:
+        print(f"\n[INFO] Generating next 24-hour LightGBM forecast...")
+        lgb_forecast_24h = generate_lightgbm_forecast(model_lgb, scaler, df_feat, feature_cols, 
+                                                       target_col, datetime_col, horizon_24h)
+        lgb_forecast_24h.to_csv(f'{results_dir}/forecast_LightGBM_24h.csv', index=False)
+        print(f"  → Saved: {results_dir}/forecast_LightGBM_24h.csv")
+    except Exception as e:
+        print(f"[!] LightGBM 24h forecast failed: {e}")
+    
+    # NHITS 24-hour forecast
+    if nf is not None:
+        try:
+            print(f"\n[INFO] Generating next 24-hour NHITS forecast...")
+            nhits_forecast_24h = generate_nhits_forecast(nf, df_feat, feature_cols, 
+                                                          target_col, horizon_24h)
+            nhits_forecast_24h.to_csv(f'{results_dir}/forecast_NHITS_24h.csv', index=False)
+            print(f"  → Saved: {results_dir}/forecast_NHITS_24h.csv")
+        except Exception as e:
+            print(f"[!] NHITS 24h forecast failed: {e}")
+    
     print("\n" + "=" * 80)
     print("ALL FORECASTING COMPLETE")
     print("=" * 80)
