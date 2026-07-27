@@ -486,10 +486,11 @@ def train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, ta
     from neuralforecast import NeuralForecast
     from neuralforecast.models import NHITS
     
-    # Prepare data
+    # Prepare data with REAL training dates
     df_train = pd.DataFrame(X_train, columns=feature_cols)
     df_train[target_col] = y_train
-    df_train['datetime'] = pd.date_range('2015-01-01', periods=len(df_train), freq='h')
+    # Use real datetime from df_feat instead of dummy dates
+    df_train['datetime'] = df_feat['datetime'].iloc[:len(df_train)].values
     df_train['unique_id'] = 'PGCB'
     df_train['ds'] = df_train['datetime']
     df_train['y'] = df_train[target_col]
@@ -500,15 +501,16 @@ def train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, ta
     h = 24
     use_cuda = USE_CUDA
     
-    # Build the NHITS model
-    # NHITS can leverage exogenous features through the predict_df API
+    # Build the NHITS model with proper training parameters
     models = [
         NHITS(
             input_size=168, 
             h=h, 
-            max_steps=100, 
+            max_steps=500,  # Increased from 100 to 500 for proper convergence
+            early_stopping_steps=50,  # Added early stopping
             scaler_type='robust',
-            accelerator='gpu' if use_cuda else 'cpu'
+            accelerator='gpu' if use_cuda else 'cpu',
+            learning_rate=1e-3  # Explicit learning rate
         )
     ]
     
@@ -518,7 +520,12 @@ def train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, ta
     print("\n  Training models:")
     for idx, model in enumerate(models):
         print(f"\n  Training {model_names[idx]}...")
-        nf.fit(df_train, val_df=df_train)
+        # Proper train/validation split (85% train, 15% validation)
+        split_idx = int(0.85 * len(df_train))
+        df_train_split = df_train.iloc[:split_idx]
+        df_val_split = df_train.iloc[split_idx:]
+        print(f"    Train size: {len(df_train_split)}, Val size: {len(df_val_split)}")
+        nf.fit(df_train_split, val_df=df_val_split)
     
     training_time = 180  # Approximate
     print(f"\n  ✓ NeuralForecast models trained in {training_time:.2f} seconds")
@@ -649,24 +656,33 @@ def evaluate_neuralforecast_models(nf, models, model_names, df_feat, feature_col
         if model_name in predictions.columns:
             y_pred = predictions[model_name].values
             
-            # Pad predictions to match test set length with last value
-            if len(y_pred) < n_test:
-                padding_value = y_pred[-1] if len(y_pred) > 0 else 0
-                y_pred = np.pad(y_pred, (0, n_test - len(y_pred)), constant_values=padding_value)
+            # FIXED: Evaluate only on REAL predictions (h=24), NO PADDING!
+            actual_horizon = 24  # NHITS trained for 24-hour horizon
+            actual_predictions_count = min(len(y_pred), actual_horizon)
             
-            evaluation = evaluate_model(y_test, y_pred, model_name, 24)
+            if actual_predictions_count < actual_horizon:
+                # Ensure we have predictions for at least the horizon
+                print(f"  Warning: NHITS returned {actual_predictions_count} predictions, expected {actual_horizon}")
+            
+            y_pred_actual = y_pred[:actual_predictions_count]
+            y_test_actual = y_test[:actual_predictions_count]
+            
+            evaluation = evaluate_model(y_test_actual, y_pred_actual, model_name, actual_predictions_count)
             results.append(evaluation)
             
-            print(f"  {model_name}: MAE: {evaluation['MAE']:.4f}, RMSE: {evaluation['RMSE']:.4f}, MAPE: {evaluation['MAPE']:.4f}%")
+            print(f"  {model_name} (24h horizon - NO PADDING): MAE: {evaluation['MAE']:.4f}, RMSE: {evaluation['RMSE']:.4f}, MAPE: {evaluation['MAPE']:.4f}%")
             
-            plot_forecasts(y_test, y_pred, test_dates, model_name, 24, n_days=7, folder=results_dir)
-            plot_residuals(y_test, y_pred, model_name, folder=results_dir)
+            plot_forecasts(y_test_actual, y_pred_actual, test_dates[:actual_predictions_count], model_name, actual_predictions_count, n_days=1, folder=results_dir)
+            plot_residuals(y_test_actual, y_pred_actual, model_name, folder=results_dir)
             
+            # Save ONLY real predictions (no padding)
             pred_df = pd.DataFrame({
-                'datetime': test_dates.values, 'actual': y_test, 'predicted': y_pred
+                'datetime': test_dates[:actual_predictions_count].values, 
+                'actual': y_test_actual, 
+                'predicted': y_pred_actual
             })
             pred_df.to_csv(f'{results_dir}/predictions_{model_name.replace("-", "_")}_24h.csv', index=False)
-            print(f"    → Saved: {results_dir}/predictions_{model_name.replace('-', '_')}_24h.csv")
+            print(f"    → Saved: {results_dir}/predictions_{model_name.replace('-', '_')}_24h.csv (Real predictions only)")
     
     return results
 
