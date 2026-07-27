@@ -475,7 +475,7 @@ def train_lightgbm(X_train, y_train, X_val, y_val, feature_names, device_info):
     return model, training_time
 
 
-def train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, target_col, device_info):
+def train_neuralforecast_models(X_train, y_train, X_val, y_val, df_feat, feature_cols, target_col, device_info):
     """Train NeuralForecast models (NHITS only)."""
     print("\n" + "=" * 80)
     print("Training NeuralForecast Models...")
@@ -945,7 +945,7 @@ def main():
     # Train NeuralForecast models (N-HiTS, TiDE, DLinear)
     try:
         print(f"\n[INFO] Training NeuralForecast models on {device_info}")
-        nf, models, model_names = train_neuralforecast_models(X_train, y_train, X_val, y_val, feature_cols, target_col, device_info)
+        nf, models, model_names = train_neuralforecast_models(X_train, y_train, X_val, y_val, df_feat, feature_cols, target_col, device_info)
         print("[✓] NeuralForecast models trained successfully")
     except Exception as e:
         print(f"[!] NeuralForecast failed with error: {e}")
