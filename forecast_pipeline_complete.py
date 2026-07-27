@@ -1032,67 +1032,15 @@ def main():
     if nf is not None:
         print(f"  • {results_dir}/neuralforecast_model.pkl - Trained NeuralForecast model")
         print(f"  • {results_dir}/neuralforecast_models.pkl - Trained DL model instances")
-        print(f"  • {results_dir}/predictions_NHITS_24h.csv - NHITS forecast results")
+        print(f"  • {results_dir}/predictions_NHITS_24h.csv - NHITS 24-hour predictions")
         print(f"  • {results_dir}/forecast_NHITS_24h.png - NHITS forecast visualization")
         print(f"  • {results_dir}/residuals_NHITS.png - NHITS residual analysis")
-    print(f"  • {results_dir}/predictions_LightGBM_24h.csv - LightGBM forecast results")
+    print(f"  • {results_dir}/predictions_LightGBM_24h.csv - LightGBM 24-hour predictions")
     print(f"  • scaler.pkl - Feature scaler for inference")
-    
-    # Step 7: Generate 5-year forecasts for both models
-    print("\n" + "=" * 80)
-    print("PHASE 7: GENERATING 5-YEAR FORECASTS")
-    print("=" * 80)
-    
-    # Generate 5-year (1825 days × 24 hours = 43800 hours) forecasts
-    horizon_24hr = 24  # 1825 days * 24 hours
-    
-    # 5-year LightGBM forecast
-    try:
-        print(f"\n[INFO] Generating 5-year LightGBM forecast (horizon={horizon_24hr} hours)...")
-        lgb_forecast_5y = generate_lightgbm_forecast(model_lgb, scaler, df_feat, feature_cols, 
-                                                      target_col, datetime_col, horizon_24hr)
-        lgb_forecast_5y.to_csv(f'{results_dir}/forecast_LightGBM_24hr.csv', index=False)
-        print(f"  → Saved: {results_dir}/forecast_LightGBM_24hr.csv")
-        
-        # Also save in prediction format
-        pred_5y_df = pd.DataFrame({
-            'datetime': lgb_forecast_5y['datetime'],
-            'actual': lgb_forecast_5y['actual'],
-            'predicted': lgb_forecast_5y['predicted']
-        })
-        pred_5y_df.to_csv(f'{results_dir}/predictions_LightGBM_24hr.csv', index=False)
-        print(f"  → Saved: {results_dir}/predictions_LightGBM_24hr.csv")
-    except Exception as e:
-        print(f"[!] LightGBM 24hr forecast failed: {e}")
-    
-    # 5-year NHITS forecast
-    if nf is not None:
-        try:
-            print(f"\n[INFO] Generating 5-year NHITS forecast (horizon={horizon_24hr} hours)...")
-            nhits_forecast_5y = generate_nhits_forecast(nf, df_feat, feature_cols, 
-                                                         target_col, horizon_24hr)
-            nhits_forecast_5y.to_csv(f'{results_dir}/forecast_NHITS_24hr.csv', index=False)
-            print(f"  → Saved: {results_dir}/forecast_NHITS_24hr.csv")
-            
-            # Also save in prediction format
-            pred_5y_df = pd.DataFrame({
-                'datetime': nhits_forecast_5y['datetime'],
-                'actual': nhits_forecast_5y['actual'],
-                'predicted': nhits_forecast_5y['predicted']
-            })
-            pred_5y_df.to_csv(f'{results_dir}/predictions_NHITS_24hr.csv', index=False)
-            print(f"  → Saved: {results_dir}/predictions_NHITS_24hr.csv")
-        except Exception as e:
-            print(f"[!] NHITS 5-year forecast failed: {e}")
     
     print("\n" + "=" * 80)
     print("ALL FORECASTING COMPLETE")
     print("=" * 80)
-    print("\nAdditional output files for 5-year forecasts:")
-    print(f"  • {results_dir}/forecast_LightGBM_24hr.csv - LightGBM 5-year forecast details")
-    print(f"  • {results_dir}/forecast_NHITS_24hr.csv - NHITS 5-year forecast details")
-    print(f"  • {results_dir}/predictions_LightGBM_24hr.csv - LightGBM 5-year predictions")
-    print(f"  • {results_dir}/predictions_NHITS_24hr.csv - NHITS 5-year predictions")
 
 
 if __name__ == "__main__":
